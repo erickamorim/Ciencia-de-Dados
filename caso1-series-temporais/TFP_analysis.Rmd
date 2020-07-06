@@ -1,0 +1,389 @@
+---
+title: "Total Factor Productivity"
+author: "Erick Amorim"
+date: "06/07/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+rm(list = ls())
+
+listofPackages = c("dplyr", "ggplot2", "gridExtra", "forecast", "lmtest", "knitr", "plotly")
+
+packages = function(listofPackages){
+  new.packages = listofPackages[!(listofPackages %in% 
+                                   installed.packages()[, "Package"])]
+  if (length(new.packages))
+    install.packages(new.packages, dependencies = TRUE)
+    #sapply(listofPackages, require, character.only = TRUE)
+}
+
+packages(listofPackages)
+lapply(listofPackages, library, character.only = TRUE)
+
+theme_update(plot.title = element_text(hjust = 0.5))
+
+data = read.csv("dados/TFP.csv")
+names(data)[which(names(data) =="isocode")] = "Paises"
+names(data)[which(names(data) =="year")] = "Ano"
+names(data)[which(names(data) =="rtfpna")] = "PTF"
+data$Paises= ifelse(data$Paises == "MEX", "Mexico",ifelse(data$Paises == "CAN", "Canada","Estados Unidos"))
+```
+
+
+Produtividade pode ser encarada como uma medida do grau de eficiência com que uma certa economia utiliza seus recursos para produzir bens de consumos e serviços. 
+Existem diversas medidas de produtividade sendo que para esta análise iremos abordar a Produtividade Total dos Fatores (PTF). A PTF, também conhecida por TFP (*Total Factor Productivity*), tem por objetivo indicar a eficiência econômica combinando a totalidade de recursos do país para gerar produto.
+
+A PTF mede o crescimento residual da produção total de uma empresa, indústria ou economia nacional que não pode ser explicada pelo acúmulo de insumos tradicionais, como trabalho e capital. Para mais informações a respeito do PTF e como é realizado seu cálculo veja [Indicadores de Produtividade: uma breve revisão dos principais métodos de cálculo](http://repositorio.ipea.gov.br/bitstream/11058/4045/1/Radar_n28_Indicadores.pdf).
+
+Aqui usaremos os dados da PTF anual de três países da América do Norte: México, Canadá e Estados Unidos. O período analisado é de `r min(data$Ano)` à `r max(data$Ano)` e contêm `r nrow(data)` observações considerando os três países.
+Na Tabela abaixo podemos observar a quantidade de observações além da sumarização do PTF para cada país.
+
+```{r, include=FALSE, echo=FALSE}
+# informacoes dos tipos de dados
+str(data)
+# verificando a existencia de valores faltantes
+colSums(is.na(data))
+```
+
+
+```{r, include=TRUE, echo=FALSE, message=FALSE}
+tab_desc =data %>% 
+            group_by(Paises) %>% 
+            summarise( Quantidade = n(),
+                     Total = round(sum(PTF),4),
+                     Media = round(mean(PTF),4),
+                     Mediana = round(median(PTF),4),
+                     desvio_padrao = round(sd(PTF),4)) %>%
+             arrange(desc(Total))
+names(tab_desc)[6] = c("Desvio padrao")
+knitr::kable(tab_desc, caption = "Estatísticas descritivas do índice PTF para cada país")
+```
+
+Observe que o `r tab_desc$Paises[1]` apresenta, em média, o maior índice PTF com `r tab_desc$Media[1]` seguido do `r tab_desc$Paises[2]` com `r tab_desc$Media[2]`, embora o `r tab_desc$Paises[1]` apresente o maior índice PTF ele também apresenta o maior desvio padrão com `r tab_desc['Desvio padrao'][[1]][1]`.
+
+Nos *boxplots* abaixo podemos perceber que os países México e Estados Unidos tem uma grande variação nos valores de PTF, porém nos  Estados Unidos nota-se menores valores deste índice. Além do mais, o Canadá tem índices de PTF concentrados em torno de `r round(tab_desc$Mediana[2],2)`, que representa sua mediana, ao longo do período analisado. Note também que o Canadá exibe alguns *outliers* (valores extremos), para o qual apresenta valores de PTF de `r round(sort( data[data$Paises == "Canada", "PTF"] )[1:3],4)` , que ocorrem nos anos de `r data$Ano[which(data$PTF %in% sort( data[data$Paises == "Canada", "PTF"] )[1:3] )]`, respectivamente.
+
+```{r, echo=FALSE, fig.align="center"}
+gbox =  data%>%
+          # mutate(Paises = reorder(Paises, PTF))%>%
+          ggplot(aes(x = Paises, y = PTF)) +
+          geom_boxplot(aes(fill = Paises))+ 
+          ylab("PTF")+
+          xlab("Países")+
+          ggtitle("Boxplot do índice PTF por país")+ theme(plot.title = element_text(size=13))
+
+ggplotly(gbox)
+
+```
+
+O gráfico da série histórica anual da PTF, exibido abaixo, mostra que o índice dos Estados Unidos tem uma tendência crescente ao longo do período de `r paste( min(data$Ano), "à", max(data$Ano))`. Entretanto o México apresenta uma tendência crescente de seu índice até meados da década de 70, e após esse período seu PTF mostra uma tendência decrescente. Em relação ao índice PTF do Canadá, nota-se que sua série exibe um comportamento quase estável entre o período de 1960 e 2008. Além do mais, percebe-se que há um certo comportamento estável da variabilidade das séries não indicando presenças de sazonalidades ao longo do período.
+
+```{r, echo=FALSE,  fig.align="center"}
+glinha=data%>%
+        ggplot(aes(x = Ano, y = PTF))+
+          geom_line(aes(color = Paises)) +
+          geom_point(aes(color = Paises))+
+          xlab("Anos") +
+          ylab("PTF")+
+          ggtitle(paste("Série anual do PTF por país no período de", min(data$Ano), "à", max(data$Ano))) + theme(plot.title = element_text(size=13))
+
+ggplotly(glinha)
+```
+
+## Análise de Séries Temporais
+
+A partir deste ponto serão desenvolvidas algumas etapas para a construção de modelos capazes de prevêr o índice de PTF para os próximos 10 anos, para isso serão feitas algumas análises envolvendo modelagem de séries temporais. Por isso, o modelo ARIMA será abordado para determinar o comportamento do índice PTF a partir de `r paste( min(data$Ano), "à", max(data$Ano))`.
+
+
+Conforme [Hyndman e Athanasopoulos (2018)](https://otexts.com/fpp2/), se combinarmos um modelo autorregressivo, a diferenciação e um modelo de média móvel, obteremos um modelo ARIMA não sazonal. [ARIMA](https://pt.wikipedia.org/wiki/ARIMA) é um acrônimo para Autoregressivo Integrado de Média Móvel. Um modelo ARIMA completo pode ser escrito como:
+\[
+\begin{equation}
+  y'_{t} = c + \phi_{1}y'_{t-1} + \cdots + \phi_{p}y'_{t-p}
+     + \theta_{1}\varepsilon_{t-1} + \cdots + \theta_{q}\varepsilon_{t-q} + \varepsilon_{t},  \tag{1.1}
+\end{equation}
+\]
+ 
+sendo $y'_{t}$ é a série diferenciada (pode ser diferenciada mais de uma vez). Os "preditores" no lado direito incluem valores defasados de $y'_{t}$ assim como erros (ruído branco) . Como notação considere ARIMA(p,d,q), em que p é a ordem da parte autoregressiva (AR(p)); d é a ordem de diferenciação envolvida (I(d)); q é a ordem da parte da média móvel (MA(q)).
+
+Uma das suposições do modelo ARIMA é de que a série $\{y'_{t} \}$ seja estacionária. Embora nem sempre a série que se deseja analisar apresente um processo estacionário, na maioria das vezes, tomando uma $(d=1)$ ou duas $(d=2)$ diferenças do tipo $y_{t} - y_{t-1}$ será obtida a estacionaridade. Por exemplo, a série anual do índice PTF dos Estados Unidos vista no gráfico anterior, mostrou uma tendência crescente ao longo do tempo, portanto, claramente esta série é não estacionária. Aplicando uma diferença nesta série 
+tem-se o seguinte resultado.
+
+```{r, echo=FALSE, fig.align="center"}
+ 
+s1 = data %>%
+        filter(Paises == "Mexico") %>%
+        select(PTF)
+
+ s2 = data %>%
+       filter(Paises == "Canada") %>%
+       select(PTF)
+
+ s3 = data %>%
+       filter(Paises == "Estados Unidos") %>%
+       select(PTF)
+
+s1 = ts(s1, start = min(data$Ano), frequency = 1)
+s2 = ts(s2, start = min(data$Ano), frequency = 1)
+s3 = ts(s3, start = min(data$Ano), frequency = 1)
+
+# Diferenciacao nao sazonal, a funcao retorna o numero de diferencas
+# necessarias para passar no teste de raiz unitaria ao nivel alfa
+d1 = ndiffs(s1)
+d2 = ndiffs(s2)
+d3 = ndiffs(s3)
+
+s1_d = diff(s1, d1)
+s2_d = diff(s2, d2)
+s3_d = diff(s3, d3)
+
+serieUSAdif=autoplot(s3_d, ylab = "", xlab = "Ano", main = "Índice PTF dos Estados Unidos após a primeira diferença")+ theme(plot.title = element_text(size=13))
+ggplotly(serieUSAdif)
+
+```
+
+Percebe-se que a série do PTF dos Estados Unidos, visualmente, parece atingir a estacionaridade após a primeira diferença. No entanto, o teste de raiz unitária deverá ser feito antes de ajustar o modelo ARIMA, a fim de investigar e/ou confirmar a estacionariedade da série.
+
+Aqui serão feitos testes de raiz unitária para determinar o número de diferenças necessárias para que as séries do índice PTF sejam estacionárias. A função `ndiffs` do pacote `forecast` apresenta três testes de raíz unitária, o teste KPSS (`test="kpss"`), o teste ADF (`test="adf"`) e o teste de Phillips-Perron (`test="pp"`). Na análise da série PTF para cada País, foi utilizado o teste KPSS, o qual indicou que será necessário fazer 2 diferenças para a série PTF do México, 2 para a série do Canadá e 1 diferença para a série do Estados Unidos, para alcançar a estacionaridade. A Figura abaixo apresenta as séries do México e Canadá após as diferenças indicadas pelo teste de raiz unitária.
+
+```{r, echo=FALSE, fig.align="center"}
+
+serieMEXdif = autoplot(s1_d, ylab = "", xlab = "Ano", main = "Índice PTF do México após a primeira diferença") + theme(plot.title = element_text(size=10))
+serieCANdif = autoplot(s2_d, ylab = "", xlab = "Ano", main = "Índice PTF do Canadá após a primeira diferença")+ theme(plot.title = element_text(size=10))
+
+grid.arrange(serieMEXdif, serieCANdif, ncol = 2)
+
+```
+
+
+## Funcões de Autocorrelação e Autocorrelação Parcial
+
+Às vezes, é possível usar os gráficos das Funcões de Autocorrelação (FAC) e Autocorrelação Parcial (FACP) para determinar valores apropriados para "p" e "q". A FAC está relacionada com a determinação da ordem da parte MA(q)
+enquanto que a FACP está relacionada com a determinação da ordem 
+da parte AR(p). Em uma primeira análise indica-se olhar os correlogramas da FAC e da FACP. Em seguida fazer o teste de [Ljung-Box](https://pt.qwe.wiki/wiki/Ljung%E2%80%93Box_test) para verificar se há alguma auto correlação diferente de zero até a defasagem k (*lag* k), ou seja, a hipótese nula do teste de Ljung-Box afirma que todas as autocorrelações até a ordem k são iguais a zero, isto é, que a série analisada é estacionária. Se a hipótese nula for rejeitada, então alguma das autocorrelações é diferente de zero, indicando evidência da existência de um modelo ARMA(p,q) ou ARIMA(p,d,q).
+
+Para a série do índice PTC, no período de `r paste( min(data$Ano), "à", max(data$Ano))`, as FAC e FACP de cada país são exibidas abaixo. Veja que não há "picos" periódicos de autocorrelações e, isto acaba indicando que não há presença de sazonalidades na série de cada país. Além disso, suas FAC apresentam um decaimento, enquanto que suas FACP exibem um "truncamento" a partir do *lag* 1. Esses comportamentos são características típicas de um modelo AR(p). Vale destacar aqui que estes correlogramas servem apenas para dar um direcionamento para o usuário.
+
+```{r, echo=FALSE, fig.align="center"}
+
+facs1 = ggAcf(s1) + ylab("FAC") + ggtitle("Correlograma da FAC - México") + theme(plot.title = element_text(size=11 ))
+facps1 = ggPacf(s1) + ylab("FACP") + ggtitle("Correlograma da FACP - México") + theme(plot.title = element_text(size=11 ))
+facs2 = ggAcf(s2) + ylab("FAC") + ggtitle("Correlograma da FAC - Canadá") + theme(plot.title = element_text(size=11 ))
+facps2 = ggPacf(s2) + ylab("FACP") + ggtitle("Correlograma da FACP - Canadá") + theme(plot.title = element_text(size=11 ))
+facs3 = ggAcf(s3) + ylab("FAC") + ggtitle("Correlograma da FAC - Estados Unidos") + theme(plot.title = element_text(size=11 ))
+facps3 = ggPacf(s3) + ylab("FACP") + ggtitle("Correlograma da FACP - Estados Unidos") + theme(plot.title = element_text(size=11 ))
+
+
+grid.arrange(facs1,facps1,facs2,facps2,facs3,facps3, nrow = 3, ncol=2)
+
+```
+```{r, echo=FALSE}
+# Teste de Ljung-Box para analizar se alguma autocorrelacao eh diferente de zero
+# ate a ordem determinada (lag = k)
+#ljungbox = Box.test(s1,lag = 10) #teste para o lag especifico
+```
+
+A Figura abaixo mostra as FAC e FACP após as diferenças feitas nas séries do índice PTF para cada país. Observe que para os países México e Canadá as FAC parecem exibir um comportamento "truncado" enquanto que suas FACP parecem mostrar um decaimento a medida que os *lags* aumentam. Essas caractetisticas se assemelham as características de um modelo MA(q). Vale ressaltar mais uma vez que estes correlogramas apenas sugerem ao analista, uma direção para o tipo de modelo a ser usado, portanto é necessário fazer testes mais formais como o teste de [Ljung-Box](http://www.bertolo.pro.br/MetodosQuantitativos/Previsao/pmc4481.htm) comentado anteriormente. 
+
+```{r, echo=FALSE, fig.align="center"}
+
+facs1dif = ggAcf(s1_d) + ylab("FAC") + ggtitle("FAC após diferenciação - México") + theme(plot.title = element_text(size=11 ))
+facps1dif = ggPacf(s1_d) + ylab("FACP") + ggtitle("FACP após diferenciação - México") + theme(plot.title = element_text(size=11 ))
+facs2dif = ggAcf(s2_d) + ylab("FAC") + ggtitle("FAC após diferenciação- Canadá") + theme(plot.title = element_text(size=11 ))
+facps2dif = ggPacf(s2_d) + ylab("FACP") + ggtitle("FACP após diferenciação - Canadá") + theme(plot.title = element_text(size=11 ))
+facs3dif = ggAcf(s3_d) + ylab("FAC") + ggtitle("FAC após diferenciação- Estados Unidos") + theme(plot.title = element_text(size=11 ))
+facps3dif = ggPacf(s3_d) + ylab("FACP") + ggtitle("FACP após diferenciação - Estados Unidos") + theme(plot.title = element_text(size=11 ))
+
+
+grid.arrange(facs1dif,facps1dif,facs2dif,facps2dif,facs3dif,facps3dif, nrow = 3, ncol=2)
+
+```
+
+## Ajuste do modelo 
+
+Após analisar os correlogramas da FAC e FAP precisamos
+identificar as ordens p e q do modelo ARIMA(p,d,q) e utilizar
+o teste de Ljung-Box sobre os resíduos obtidos após o ajuste.
+Se não for confirmado que o modelo é adequado, então deve-se 
+retomar as análises para diferentes valores de ordem (p, q) e verificar
+o comportamento dos resídos, que não devem ter autocorrelação. Isso significa testar ajustes para diversos modelos ARIMA, pois tem-se diferentes combinações de p e q. Para não ter um árduo tempo gasto fazendo todos esses testes repetidas vezes, será utilizado aqui a função [`auto.arima`](https://www.rdocumentation.org/packages/forecast/versions/8.12/topics/auto.arima) do pacote `forecast`. Esta 
+funcao realiza todos esses procedimentos comentados acima, fazendo a seleção do modelo que melhor se adequa a série analisada.
+
+Para a série do índice de PTF de cada pais foram feitos ajustes dos modelos ARIMA por meio da função [`auto.arima`](https://www.rdocumentation.org/packages/forecast/versions/8.12/topics/auto.arima). Foram retiradas os índices de PTF dos 10 últimos anos (2001 à 2011) para compor uma base usada para teste dos modelos, isto é, com as últimas observações serão calculadas algumas medidas de qualidade do ajuste do modelo proposto para fazer as previsões. 
+
+
+A Tabela abaixo apresenta os modelos obtidos para cada país e algumas medidas de qualidade de ajuste. Estas medidas foram calculadas considerando a penas os índices da base de treino, isto é, 10 observações. Note que para cada país há um modelo para prever o índice PTF, por exemplo, para o México pode-se dizer que o modelo encontrado ARIMA(0,2,1) é similar a um modelo de Média Movel (MA(1)) após duas diferenças (d=2) na série original, veja também que o modelo usado para os Estados Unidos, ARIMA(0,1,0), é um simples [passeio aleatório](https://pt.wikipedia.org/wiki/Passeio_aleat%C3%B3rio). além disso, pode-se observar também que as medidas como a Raiz do Erro Quadrático Médio (RMSE) e o Erro Percentual Médio Absoluto (MAPE) apresentam valores baixos para os 3 modelos adotado em cada país.
+
+
+```{r, include=TRUE, echo=FALSE, message=FALSE, fig.align="center", warning=FALSE}
+
+#separando 10 observacoes para treino
+s1_treino = ts(s1[1:52], frequency = 1)
+s1_teste = ts(s1[53:62], frequency = 1)
+s2_treino = ts(s2[1:52], frequency = 1)
+s2_teste = ts(s2[53:62], frequency = 1)
+s3_treino = ts(s3[1:52], frequency = 1)
+s3_teste = ts(s3[53:62], frequency = 1)
+
+# usando a funcao auto.arima. A funcao auto.arima ajusta e testa varios modelos 
+# selecionando e indicando para o usuario o modelo que melhor se ajusta a serie
+
+ajuste_s1 = auto.arima(y = s1_treino, max.p = 10, max.q = 10)
+ajuste_s2 = auto.arima(y = s2_treino, max.p = 10, max.q = 10)
+ajuste_s3 = auto.arima(y = s3_treino, max.p = 10, max.q = 10)
+
+prev_s1 = as.data.frame( forecast(ajuste_s1, h = 10) )
+names(prev_s1)[1] = "previsoes"
+names(prev_s1)[4] = "li95"
+names(prev_s1)[5] = "ls95"
+
+prev_s2 = as.data.frame( forecast(ajuste_s2, h = 10) )
+names(prev_s2)[1] = "previsoes"
+names(prev_s2)[4] = "li95"
+names(prev_s2)[5] = "ls95"
+
+prev_s3 = as.data.frame( forecast(ajuste_s3, h = 10) )
+names(prev_s3)[1] = "previsoes"
+names(prev_s3)[4] = "li95"
+names(prev_s3)[5] = "ls95"
+
+#Tabela com as medidas de qualidade de ajuste
+
+tabela_acc = rbind(accuracy(s1_teste, prev_s1$previsoes),accuracy(s2_teste, prev_s2$previsoes),accuracy(s3_teste, prev_s3$previsoes))
+rownames(tabela_acc) = c("México", "Canadá", "Estados Unidos")
+
+tabela_acc = cbind(data.frame( Modelos = c("ARIMA(0,2,1)", "ARIMA(2,1,2)", "ARIMA(0,1,0)") ), tabela_acc)
+
+knitr::kable(tabela_acc, caption = "Medidas de qualidade de ajuste nos dados de teste", digits = 4)
+
+
+```
+
+O Gráfico abaixo representa a série histórica do índice de PTF do México (em preto) juntamente com o ajuste do modelo ARIMA(0,2,1) (em azul). Note que o modelo consegue se ajustar bem a série ao longo dos anos de 1950 à 2001. As previsões para o período de 2002 à 2011 estão representadas pelo seguimento em vermelho. Veja que as previsões para o índice PTF apresentam um decrescimento ao longo desse período, assim como os valores reais.
+
+```{r, include=TRUE, echo=FALSE, fig.align="center"}
+
+
+grafs1 = ggplot() + geom_line( data = s1, aes(y=s1, x = seq(1950,2011)) )+
+         geom_line(data = s1_treino, aes(y = ajuste_s1$fitted, x = seq(1950,2001)), col ="blue") +
+         geom_point(data = s1, aes(y = s1, x =seq(1950,2011) ))+
+         geom_line(data = prev_s1, aes(y = previsoes, x =seq(2002,2011)), col = "red") +
+         geom_ribbon(data = prev_s1, aes(y = previsoes, x =seq(2002,2011), ymin = li95, ymax = ls95), alpha=0.3)+
+         geom_vline(xintercept = 2001)+
+         xlab("Ano")+
+         ylab("PTF")+
+         ggtitle("Ajuste do índice PTF para o México e previsões para período de 2002 à 2011 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+
+ggplotly(grafs1) 
+
+```
+
+Em relação à série do índice PTF para o Canadá, pode ser observado no gráfico abaixo, que o modelo ARIMA(2,1,2) (em azul) se ajusta bem aos dados acompanhando adequadamente a série do índice PTF (em preto). Note que as previsões (em vermelho) para o período aparecem distantes do valor real, embora essas previsões pareçam distantes, ainda pode-se observar que os valores reais estão dentro do intervalo de confiança de 95% de previsão.
+
+```{r, echo=FALSE, include=TRUE, warning=FALSE,  fig.align="center"}
+
+grafs2 = ggplot() + geom_line( data = s2, aes(y=s2, x = seq(1950,2011)) )+
+         geom_line(data = s2_treino, aes(y = ajuste_s2$fitted, x = seq(1950,2001)), col ="blue") +
+         geom_point(data = s2, aes(y = s2, x =seq(1950,2011) ))+
+         geom_line(data = prev_s2, aes(y = previsoes, x =seq(2002,2011)), col = "red") +
+         geom_ribbon(data = prev_s2, aes(y = previsoes, x =seq(2002,2011), ymin = li95, ymax = ls95), alpha=0.3)+
+         geom_vline(xintercept = 2001)+
+         xlab("Ano")+
+         ylab("PTF")+
+         ggtitle("Ajuste do índice PTF para o Canadá e previsões para período de 2002 à 2011 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+
+ggplotly(grafs2) 
+
+```
+
+Para a série do índice PTF dos Estados Unidos (em preto), no gráfico abaixo, observa-se um bom comportamento do modelo ARIMA(0,1,0), representando um passeio aleatório (em azul). Veja que as previsões do índice PTF, para o período de 2002 à 2011, aumentam acompanhando bem os valores reais usados como teste de validação do modelo. Note também que os intervalos de confiança de previsão é mais curto do que os dos demais países.
+
+
+```{r, echo=FALSE, include=TRUE,  fig.align="center", warning=FALSE}
+
+grafs3 = ggplot() + geom_line( data = s3, aes(y=s3, x = seq(1950,2011)) )+
+         geom_line(data = s3_treino, aes(y = ajuste_s3$fitted, x = seq(1950,2001)), col ="blue") +
+         geom_point(data = s3, aes(y = s3, x =seq(1950,2011) ))+
+         geom_line(data = prev_s3, aes(y = previsoes, x =seq(2002,2011)), col = "red") +
+         geom_ribbon(data = prev_s3, aes(y = previsoes, x =seq(2002,2011), ymin = li95, ymax = ls95), alpha=0.3)+
+         geom_vline(xintercept = 2001)+
+         xlab("Ano")+
+         ylab("PTF")+
+         ggtitle("Ajuste do índice PTF para o Estados Unidos e previsões para período de 2002 à 2011 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+
+ggplotly(grafs3) 
+
+```
+
+## Previsões 
+
+
+Nesta etapa são realizadas previsões para o índice PTF para a próxima década, isto é, para o período de 2012 à 2021. Aqui foram utilizados os todas as 62 observações referente ao índice PTF de cada país, para construír um modelo que será usado para fazer as previsões. Considerando toda informação sobre os métodos abordados anteriormente, os modelo obtidos para fazer as previsões são apresentados na Tabela abaixo, eles são os mesmos obtidos como anteriormente. Entretanto no caso do Canadá o modelo ARIMA(0,2,3) foi o mais adequado (de acordo com a função `auto.arima`) diferentemente do que havia ocorrido nas análises anteriores.
+
+```{r, echo=FALSE, include=TRUE}
+
+#ajuste para toda a serie
+ajuste_MEX = auto.arima(y = s1, max.p = 10, max.q = 10)
+ajuste_CAN = auto.arima(y = s2, max.p = 10, max.q = 10)
+ajuste_USA = auto.arima(y = s3, max.p = 10, max.q = 10)
+
+tab_modelos = data.frame(Paises =c("México", "Canadá", "Estados Unidos"), Modelos = c("ARIMA(0,2,1)", "ARIMA(0,2,3)", "ARIMA(0,1,0)") )
+
+knitr::kable(tab_modelos, caption = "Modelos construídos para fazer as previsões")
+
+```
+
+A Tabela abaixo apresenta os valores das previsõe do índice PTF ao longo dos anos para cada país.Note que os países México e Canadá apresentam índices do PTF diminuindo ao longo dos anos, em contra partida, o índice do PTF dos Estados Unidos aumenta ao longo deste período.
+
+```{r, echo=FALSE, include=TRUE}
+
+#previsoes para os proximos 10 anos
+Ano = seq(2012,2021)
+Mexico = forecast(ajuste_MEX, h = 10)
+Canada = forecast(ajuste_CAN, h = 10)
+Estados_Unidos = forecast(ajuste_USA, h = 10)
+Mexico = round(as.vector(Mexico$mean),4)
+Canada = round(as.vector(Canada$mean),4)
+Estados_Unidos = round(as.vector(Estados_Unidos$mean),4)
+
+previsoes = cbind(Ano, Mexico, Canada, Estados_Unidos)
+knitr::kable(previsoes, caption = "Previsões do índice de PTF para os próximo anos")
+
+previsoes = as.data.frame(previsoes)
+
+
+```
+
+A Figura abaixo apresenta os gráficos com as séries históricas dos índice de PTF para cada país (em preto) seguida de suas previsões para o período de 2011 à 2021.  
+
+```{r, echo=FALSE,  fig.align="center"}
+
+
+grafprevMEX = autoplot(forecast(ajuste_MEX, h = 10))+
+  xlab("Anos")+ylab("PTF")+ggtitle("Previsões do índice PTF para o México via ARIMA(0,2,1) para período de 2011 à 2021 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+grafprevCAN = autoplot(forecast(ajuste_CAN, h = 10))+
+  xlab("Anos")+ylab("PTF")+ggtitle("Previsões do índice PTF para o Canadá via ARIMA(0,2,3) para período de 2011 à 2021 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+grafprevUSA = autoplot(forecast(ajuste_USA, h = 10))+
+  xlab("Anos")+ylab("PTF")+ggtitle("Previsões do índice PTF para o Estados Unidos via ARIMA(0,1,0) para período de 2011 à 2021 ") + 
+         theme(plot.title = element_text(size=11 ))
+
+grid.arrange(grafprevMEX, grafprevCAN, grafprevUSA)
+
+```
+
+## Outras Referências 
+
+HYNDMAN, R.J., & ATHANASOPOULOS, G. (2018) Forecasting: principles and practice, 2nd edition, OTexts: Melbourne, Australia. Disponível em: <https://otexts.com/fpp2/>. Accessed on 12 Set 2019.
+
